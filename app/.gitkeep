@@ -1,0 +1,82 @@
+# app/app.py
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
+import joblib
+import streamlit as st
+
+# --- paths ---
+BASE = Path(__file__).resolve().parents[1]
+DATA = BASE / "data"
+MODEL = BASE / "model"
+IMAGES = BASE / "images"
+
+# --- load artifacts ---
+model = joblib.load(MODEL / "win_predictor.pkl")
+scaler = joblib.load(MODEL / "scaler.pkl")
+features = pd.read_csv(MODEL / "features.csv", header=None)[0].tolist()
+metrics = json.loads((MODEL / "metrics.json").read_text())
+
+# data for defaults & team lookup
+df = pd.read_csv(DATA / "clean_team_stats.csv")
+stats = df[features].describe().T  # min/mean/max per feature
+
+# --- UI ---
+st.set_page_config(page_title="NBA Win% Predictor", page_icon="🏀", layout="centered")
+st.title("🏀 NBA Win% Predictor")
+
+st.caption(
+    "Model: Linear Regression on team advanced stats. "
+    f"Holdout metrics → **R² {metrics['r2']:.3f}**, **RMSE {metrics['rmse']:.3f}**, "
+    f"baseline RMSE {metrics['baseline_rmse']:.3f}."
+)
+
+mode = st.radio("How do you want to provide inputs?", ["Pick team & season", "Enter manually"])
+
+# build the input row
+if mode == "Pick team & season":
+    c1, c2 = st.columns(2)
+    team = c1.selectbox("Team", sorted(df["team"].unique()))
+    season = c2.selectbox("Season", sorted(df["season"].unique()))
+    row = df[(df.team == team) & (df.season == season)]
+    if row.empty:
+        st.warning("No row found for that team/season.")
+        st.stop()
+    X = row[features].iloc[[0]].copy()
+else:
+    st.subheader("Manual feature inputs")
+    values = {}
+    for f in features:
+        s = stats.loc[f]
+        default = float(s["mean"])
+        minv = float(s["min"])
+        maxv = float(s["max"])
+        # Wider guardrails
+        rng = maxv - minv
+        minv = minv - 0.1 * rng
+        maxv = maxv + 0.1 * rng
+        values[f] = st.number_input(
+            f, value=round(default, 4), min_value=float(minv),
+            max_value=float(maxv), step=0.001, format="%.4f"
+        )
+    X = pd.DataFrame([values], columns=features)
+
+if st.button("Predict"):
+    Xs = scaler.transform(X[features])
+    pred = float(model.predict(Xs)[0])            # Win%
+    wins = pred * 82
+    c1, c2 = st.columns(2)
+    c1.metric("Predicted Win%", f"{pred:.3f}")
+    c2.metric("Predicted Wins (82 gms)", f"{wins:.1f}")
+
+    with st.expander("Show inputs"):
+        st.dataframe(X.reset_index(drop=True))
+    st.caption("Tip: coefficients plots are in the repo images folder.")
+
+st.sidebar.header("About")
+st.sidebar.write(
+    "This app loads a trained linear model and StandardScaler, "
+    "then predicts Win% based on team advanced stats."
+)
+st.sidebar.write("Repo folder:", str(BASE))
